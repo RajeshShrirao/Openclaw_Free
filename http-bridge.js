@@ -1,6 +1,12 @@
 const BRIDGE_URL = 'http://localhost:8765';
 let pollInterval = null;
 const POLL_DELAY = 500; 
+let requestsInFlight = 0;
+
+const finishRequest = () => {
+  requestsInFlight = Math.max(0, requestsInFlight - 1);
+  return requestsInFlight;
+};
 
 function log(...args) {
   const msg = '[Bridge] ' + args.join(' ');
@@ -37,7 +43,10 @@ async function pollForRequests() {
     const request = await response.json();
     log(`Received request id=${request.id} prompt="${request.prompt.substring(0, 80)}${request.prompt.length > 80 ? '…' : ''}"`);
 
+    const normalizedPrompt = (typeof request.prompt === 'string' ? request.prompt.trim() : '');
+    const shouldForceNewGemini = normalizedPrompt === '/new';
     log(`Forwarding request ${request.id} to background.js`);
+    requestsInFlight++;
     chrome.runtime.sendMessage(
       {
         action: 'runGemini',
@@ -47,6 +56,7 @@ async function pollForRequests() {
       (bgResponse) => {
         if (chrome.runtime.lastError) {
           log(`ERROR from background for ${request.id}:`, chrome.runtime.lastError.message);
+          finishRequest();
 
           fetch(`${BRIDGE_URL}/response/${request.id}`, {
             method: 'POST',
@@ -77,14 +87,20 @@ async function pollForRequests() {
               log(`ERROR: Server rejected response for ${request.id}: ${text}`);
             }
 
-            try {
+            const remaining = finishRequest();
+            if (remaining === 0 && shouldForceNewGemini) {
               log(`Requesting openNewGemini (force) after delivering ${request.id}`);
               chrome.runtime.sendMessage({ action: 'openNewGemini', force: true });
-            } catch (e) {
-              log('Failed to reopen Gemini:', e.message);
+            } else if (remaining === 0) {
+              log(`Skipping openNewGemini — no new-chat request and ${remaining} request(s) remaining`);
+            } else {
+              log(`Skipping openNewGemini — ${remaining} request(s) still in flight`);
             }
           })
-          .catch(err => log(`FETCH ERROR sending response for ${request.id}:`, err.message));
+          .catch(err => {
+            finishRequest();
+            log(`FETCH ERROR sending response for ${request.id}:`, err.message);
+          });
       }
     );
 

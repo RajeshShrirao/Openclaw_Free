@@ -60,24 +60,33 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
     if (force) {
       chrome.tabs.query({ url: 'https://gemini.google.com/*' }, tabs => {
-        if (tabs && tabs.length) {
-          const ids = tabs.map(t => t.id).filter(Boolean);
-          bglog('force: closing Gemini tabs', ids);
-          chrome.tabs.remove(ids, () => {
-            bglog('force: closed Gemini tabs, opening fresh Gemini tab');
-            chrome.tabs.create({ url: 'https://gemini.google.com/' }, newTab => {
+        const createFresh = () => {
+          bglog('force: opening fresh Gemini tab');
+          chrome.tabs.create({ url: 'https://gemini.google.com/' }, newTab => {
+            if (chrome.runtime.lastError) {
+              bglog('force: create failed:', chrome.runtime.lastError.message);
               clearTimeout(clearOpenFlagTimer);
               _openInProgress = false;
-              sendResponse({ ok: true, opened: true, tabId: newTab.id, forced: true });
-            });
-          });
-        } else {
-          bglog('force: no existing Gemini tabs, opening Gemini');
-          chrome.tabs.create({ url: 'https://gemini.google.com/' }, newTab => {
+              sendResponse({ ok: false, error: chrome.runtime.lastError.message });
+              return;
+            }
             clearTimeout(clearOpenFlagTimer);
             _openInProgress = false;
             sendResponse({ ok: true, opened: true, tabId: newTab.id, forced: true });
           });
+        };
+
+        if (tabs && tabs.length) {
+          const ids = tabs.map(t => t.id).filter(Boolean);
+          bglog('force: closing Gemini tabs', ids);
+          chrome.tabs.remove(ids, () => {
+            if (chrome.runtime.lastError) {
+              bglog('force: remove failed (tab may already be closed):', chrome.runtime.lastError.message);
+            }
+            createFresh();
+          });
+        } else {
+          createFresh();
         }
       });
     } else {
@@ -86,6 +95,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           const t = extTabs[0];
           bglog('found existing extension shell tab, focusing', t.id);
           chrome.tabs.update(t.id, { active: true }, () => {
+            if (chrome.runtime.lastError) {
+              bglog('shell tab update failed, opening new one:', chrome.runtime.lastError.message);
+              chrome.tabs.create({ url: chrome.runtime.getURL('gemini-shell.html') }, newTab => {
+                clearTimeout(clearOpenFlagTimer);
+                _openInProgress = false;
+                sendResponse({ ok: true, opened: true, tabId: newTab.id });
+              });
+              return;
+            }
             clearTimeout(clearOpenFlagTimer);
             _openInProgress = false;
             sendResponse({ ok: true, focused: true });
@@ -95,18 +113,24 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
         chrome.tabs.query({ url: 'https://gemini.google.com/*' }, tabs => {
           if (tabs && tabs.length) {
-            const ids = tabs.map(t => t.id).filter(Boolean);
-            bglog('closing gemini.google.com tabs', ids);
-            chrome.tabs.remove(ids, () => {
-              bglog('closed old tabs, opening new extension tab');
-              chrome.tabs.create({ url: chrome.runtime.getURL('gemini-shell.html') }, newTab => {
-                clearTimeout(clearOpenFlagTimer);
-                _openInProgress = false;
-                sendResponse({ ok: true, opened: true, tabId: newTab.id });
-              });
+            const t = tabs[0];
+            bglog('reusing existing Gemini tab', t.id);
+            chrome.tabs.update(t.id, { active: true }, () => {
+              if (chrome.runtime.lastError) {
+                bglog('gemini tab update failed, opening new one:', chrome.runtime.lastError.message);
+                chrome.tabs.create({ url: chrome.runtime.getURL('gemini-shell.html') }, newTab => {
+                  clearTimeout(clearOpenFlagTimer);
+                  _openInProgress = false;
+                  sendResponse({ ok: true, opened: true, tabId: newTab.id });
+                });
+                return;
+              }
+              clearTimeout(clearOpenFlagTimer);
+              _openInProgress = false;
+              sendResponse({ ok: true, reused: true, tabId: t.id });
             });
           } else {
-            bglog('no existing Gemini tabs, opening extension page');
+            bglog('no existing tabs, opening extension page');
             chrome.tabs.create({ url: chrome.runtime.getURL('gemini-shell.html') }, newTab => {
               clearTimeout(clearOpenFlagTimer);
               _openInProgress = false;
